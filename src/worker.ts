@@ -32,6 +32,11 @@ const sendEmail = async (toEmail:string) => {
 const processJob = async (job:any) => {
     console.log(`[Worker] Processing Job #${job.id} (Priority:${job.priority})`)
 
+    //create a ronadom crash
+    if(Math.random()<0.5){
+        throw new Error("Simulated worker crash")
+    }
+    
     //check the payload to see what task the (Express API) wrote on the ticket
     if(job.payload.task == "send_email"){
         await sendEmail(job.payload.to)
@@ -60,17 +65,51 @@ const pollQueue = async () => {
         const job = result.rows[0]
 
         if(job){
-            // 1. Process the job (Send the email)
-            await processJob(job)
-            // 2. Mark the ticket as completed on the rail
-            await query(`
-                UPDATE jobs
-                SET status = completed,
-                updated_at = NOW()
-                WHERE id = $1
-                `,[job.id]
-            )
-            // 3. Keep polling the rail for the next ticket
+            try{
+                // 1. Process the job (Send the email)
+                await processJob(job)
+                // 2. Mark the ticket as completed on the rail
+                await query(`
+                    UPDATE jobs
+                    SET status = 'completed',
+                    updated_at = NOW()
+                    WHERE id = $1
+                    `,[job.id]
+                )
+            }catch(jobError:any){
+                console.error(`[WORKER] Job# ${job.id} Failed Error:${jobError.message}`)
+
+                const nextAttemt = job.attempts + 1
+
+                if(nextAttemt >= job.max_attempts){
+                    console.log(`[WORKER] Job #${job.id} completely failed. Moving to Dead Letter Queue.\n`)
+
+                    //Move to DLQ
+                    await query(`
+                    INSERT INTO dead_letters (id, payload, priority, attempts, error_message, created_at)
+                    VALUES ($1,$2,$3,$4,$5,$6)
+                    `,[job.id,job.payload,job.priority,nextAttemt,jobError.message,job.created_at])
+
+                    //delete from main queue
+                    await query(`
+                        DELETE FROM jobs WHERE id=$1
+                        `,[job.id])
+                }
+                else{
+                    const backoffSeconds = Math.pow(2,nextAttemt)
+                    console.log(`[Worker] Retrying Job #${job.id} in ${backoffSeconds} seconds...\n`)
+                    
+                    
+                    await query(`
+                        UPDATE jobs SET status = 'queued',
+                        attempts = $1,
+                        run_at = NOW()+INTERVAL'${backoffSeconds} seconds',
+                        updated_at = NOW()
+                        WHERE id = $2
+                        `,[nextAttemt,job.id])
+                }
+            }
+            //Release the lock and start polling again immediately to prevent lock timeout
             pollQueue()
         }
         else{
