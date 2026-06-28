@@ -34,6 +34,40 @@ app.get('/health', async (req, res, next) => {
     next(error)
   }
 });
+app.get("/stats", async (req,res,next)=> {
+  try{
+    // We ask the database to group all jobs by their status and count them
+    const result = await pool.query(`
+      SELECT status, COUNT(*) as count
+      FROM jobs
+      GROUP BY status
+      `)
+    //count how many jobs failed
+    const dlqResult = await pool.query(`SELECT COUNT(*) FROM dead_letters`)
+
+    res.json({
+      active_queue:result.rows,
+      dead_letters:parseInt(dlqResult.rows[0].count)
+    })
+  }
+  catch(error){
+    next(error)
+  }
+})
+//displaying failed jobs
+app.get("/dlq", async (req, res, next) => {
+  try{
+    const result = await pool.query(`
+      SELECT * FROM dead_letters
+      ORDER BY failed_at DESC
+      `)
+
+    res.json(result.rows)
+  }
+  catch(error){
+    next(error)
+  }
+})
 
 //global error handler
 app.use((err:any,req:Request,res:Response,next:NextFunction) => {
